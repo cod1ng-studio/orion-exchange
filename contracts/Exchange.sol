@@ -126,6 +126,24 @@ contract Exchange is Ownable, Utils {
         emit NewAssetWithdrawl(_msgSender(), assetAddress, amountDecimal);
     }
 
+    function withdrawAfterSwap(LibValidator.Swap swap)
+        internal
+        nonReentrant
+    {
+        address senderAddress = swap.order0.senderAddress;
+
+        LibValidator.Order lastOrder = swap.order1.senderAddress != 0 ? swap.order1 : swap.order0;
+        address assetAddress = lastOrder.side == "sell" ? lastOrder.quoteAsset : lastOrder.baseAsset;
+
+        uint256 amountDecimal = assetBalances[senderAddress][assetAddress];
+
+        assetBalances[senderAddress][assetAddress] = 0;
+
+        safeTransfer(swap.withdrawAddress, assetAddress, amountDecimal);
+
+        emit NewAssetWithdrawl(senderAddress, assetAddress, amountDecimal);
+    }
+
     /**
      * @dev Get asset balance for a specific address
      * @param assetAddress address of the asset to query
@@ -197,6 +215,29 @@ contract Exchange is Ownable, Utils {
         return orderStatus[orderHash];
     }
 
+    function fillOrdersSwap (
+        LibValidator.Swap memory swap,
+        LibValidator.Order memory takerOrder,
+        uint256 filledPrice,
+        uint256 filledAmount,
+        uint8 swapOrderIndex
+    ) public nonReentrant {
+        require(LibValidator.validateSwapV3(swap), "E2");
+        require(LibValidator.validateV3(takerOrder), "E2");
+
+        LibValidator.Order makerOrder = swapOrderIndex == 0 ? swap.order0 : swap.order1;
+        bool isSell = makerOrder.side == "sell";
+        LibValidator.Order buyOrder = isSell ? takerOrder : makerOrder;
+        LibValidator.Order sellOrder = isSell ? makerOrder : takerOrder;
+
+        _fillOrders(buyOrder, sellOrder, filledPrice, filledAmount);
+
+        uint8 lastIndex = swap.order1.senderAddress != 0 ? 1 : 0;
+        if ((swap.withdrawAddress != 0) && (swapOrderIndex == lastIndex)) {
+            withdrawAfterSwap(swap);
+        }
+    }
+
     /**
      * @notice Settle a trade with two orders, filled price and amount
      * @dev 2 orders are submitted, it is necessary to match them:
@@ -213,6 +254,18 @@ contract Exchange is Ownable, Utils {
         uint256 filledPrice,
         uint256 filledAmount
     ) public nonReentrant {
+        require(LibValidator.validateV3(buyOrder), "E2");
+        require(LibValidator.validateV3(sellOrder), "E2");
+
+        _fillOrders(buyOrder, sellOrder, filledPrice, filledAmount);
+    }
+
+    function _fillOrders(
+        LibValidator.Order memory buyOrder,
+        LibValidator.Order memory sellOrder,
+        uint256 filledPrice,
+        uint256 filledAmount
+    ) internal nonReentrant {
         // --- VARIABLES --- //
 
         // Amount of quote asset
@@ -281,6 +334,14 @@ contract Exchange is Ownable, Utils {
         returns (bool isValid)
     {
         isValid = LibValidator.validateV3(order);
+    }
+
+    function validateSwap(LibValidator.Swap memory swap)
+        public
+        pure
+        returns (bool isValid)
+    {
+        isValid = LibValidator.validateSwapV3(swap);
     }
 
     /**

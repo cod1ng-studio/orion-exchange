@@ -24,6 +24,13 @@ library LibValidator {
         )
     );
 
+    // https://github.com/blockvigil/api-usage-examples/blob/master/EIP-712/EIP712NestedStruct.sol
+    bytes32 public constant SWAP_TYPEHASH = keccak256(
+        abi.encodePacked(
+            "Swap(Order order0, Order order1, address withdrawAddress)Order(address senderAddress,address matcherAddress,address baseAsset,address quoteAsset,address matcherFeeAsset,uint64 amount,uint64 price,uint64 matcherFee,uint64 nonce,uint64 expiration,string side)"
+        )
+    );
+
     bytes32 public constant DOMAIN_SEPARATOR = keccak256(
         abi.encode(
             EIP712_DOMAIN_TYPEHASH,
@@ -46,6 +53,13 @@ library LibValidator {
         uint64 nonce;
         uint64 expiration;
         string side; // buy or sell
+        bytes signature;
+    }
+
+    struct Swap {
+        Order order0;
+        Order order1; // if there is no second order, all fields must be zero
+        address withdrawAddress; // if withdrawal is not needed - must be zero
         bytes signature;
     }
 
@@ -120,6 +134,72 @@ library LibValidator {
             );
     }
 
+    function validateSwapV3(Swap memory swap) public pure returns (bool) {
+        bytes32 domainSeparator = DOMAIN_SEPARATOR;
+
+        bytes32 digest = keccak256(
+            abi.encodePacked(
+                "\x19\x01",
+                domainSeparator,
+                getSwapTypeValueHash(swap)
+            )
+        );
+
+        if (swap.signature.length != 65) {
+            revert("ECDSA: invalid signature length");
+        }
+
+        if (swap.order1.senderAddress != 0 && swap.order0.senderAddress != swap.order1.senderAddress) {
+            revert("ECDSA: invalid orders sender addresses");
+        }
+
+        // Divide the signature in r, s and v variables
+        bytes32 r;
+        bytes32 s;
+        uint8 v;
+
+        bytes memory signature = swap.signature;
+
+        // ecrecover takes the signature parameters, and the only way to get them
+        // currently is to use assembly.
+        // solhint-disable-next-line no-inline-assembly
+        assembly {
+            r := mload(add(signature, 0x20))
+            s := mload(add(signature, 0x40))
+            v := byte(0, mload(add(signature, 0x60)))
+        }
+
+        if (
+            uint256(s) >
+            0x7FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF5D576E7357A4501DDFE92F46681B20A0
+        ) {
+            revert("ECDSA: invalid signature 's' value");
+        }
+
+        if (v != 27 && v != 28) {
+            revert("ECDSA: invalid signature 'v' value");
+        }
+
+        return ecrecover(digest, v, r, s) == swap.order0.senderAddress;
+    }
+
+    function getSwapTypeValueHash(Swap memory _swap)
+        internal
+        pure
+        returns (bytes32)
+    {
+        bytes32 swapTypeHash = SWAP_TYPEHASH;
+
+        return keccak256(
+            abi.encode(
+                swapTypeHash,
+                getTypeValueHash(_swap.order0),
+                getTypeValueHash(_swap.order1),
+                _swap.withdrawAddress
+            )
+        );
+    }
+
     function checkOrdersInfo(
         Order memory buyOrder,
         Order memory sellOrder,
@@ -128,9 +208,6 @@ library LibValidator {
         uint256 filledPrice,
         uint256 currentTime
     ) public pure returns (bool success) {
-        require(validateV3(buyOrder), "E2");
-        require(validateV3(sellOrder), "E2");
-
         // Same matcher address
         require(
             buyOrder.matcherAddress == sender &&
